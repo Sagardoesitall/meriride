@@ -22,7 +22,30 @@ MeriRide is configured as a single Node service: Railway builds the React app, a
 
    If your Railway database service has a different name, replace `MySQL` in each reference with that service name. Set `CLIENT_ORIGIN` after generating the app's public domain.
 
-5. Export the existing `meriride` database from MySQL Workbench and import it into the Railway MySQL database. Do not commit the SQL dump to GitHub. Apply the booking location migration and the booking permission grants to the hosted database as needed.
+5. Initialize a **blank** hosted database without moving local customer or booking records. With the Railway CLI signed in and the project linked, open a private MySQL tunnel and run the schema initializer from PowerShell:
+
+   ```powershell
+   railway connect MySQL --tunnel-only
+   ```
+
+   In a second terminal, set the tunnel port printed by the first command, then run:
+
+   ```powershell
+   $env:MERIRIDE_BOOTSTRAP_PORT = 'PASTE_TUNNEL_PORT_HERE'
+   railway run --service MySQL -- node database/initialize-cloud-db.js
+   Remove-Item Env:MERIRIDE_BOOTSTRAP_PORT
+   ```
+
+   This creates the three empty tables using `database/cloud-schema.sql`. It does not copy users, bookings, or vehicles. Existing data should only be migrated after explicitly deciding which records to move.
+
 6. Generate a public domain for the app service. The health check is `/api/health`.
+
+7. To create the first hosted admin, register a normal account in the live app, then promote only that account in the hosted MySQL database:
+
+   ```sql
+   UPDATE users SET role = 'admin' WHERE email = 'your-admin-email@example.com';
+   ```
+
+   The production app intentionally disables one-time local admin setup. The local `admin-booking-permissions.sql` grant is for the local-only MySQL user and should not be applied to Railway.
 
 The first-admin setup route is intentionally disabled in production. Create or promote an admin account directly in the hosted database, and use a password created through the app so it is stored as a bcrypt hash.
