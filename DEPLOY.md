@@ -48,4 +48,10 @@ MeriRide is configured as a single Node service: Railway builds the React app, a
 
    The production app intentionally disables one-time local admin setup. The local `admin-booking-permissions.sql` grant is for the local-only MySQL user and should not be applied to Railway.
 
+## Local vehicle photo and supercar setup
+
+The admin vehicle form stores an uploaded, resized image and a `standard` or `supercar` category in MySQL. To enable it in your local database, open `database/vehicle-image-supercar-migration.sql` in MySQL Workbench, select the `meriride` connection, and execute it once. It adds the two vehicle columns and grants the local app user permission to add vehicles. The hosted database already has these columns.
+
+In the admin dashboard, open **Cars** and use **Add a car**. Choose **Supercar & Prestige** to make the car appear in the homepage's supercar section. Existing vehicles remain in the standard collection unless an admin adds a new supercar.
+
 The first-admin setup route is intentionally disabled in production. Create or promote an admin account directly in the hosted database, and use a password created through the app so it is stored as a bcrypt hash.

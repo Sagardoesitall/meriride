@@ -15,6 +15,37 @@ async function readResponse(response) {
   catch { throw new Error(body || `Server returned an unexpected response (${response.status}).`) }
 }
 
+async function imageFileToDataUrl(file) {
+  if (!file?.type || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+    throw new Error('Choose a JPG, PNG, or WebP image.')
+  }
+  if (file.size > 8 * 1024 * 1024) throw new Error('Choose an image smaller than 8 MB.')
+
+  let blob = file
+  if (typeof createImageBitmap === 'function') {
+    const bitmap = await createImageBitmap(file)
+    const scale = Math.min(1, 1400 / bitmap.width, 1000 / bitmap.height)
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale))
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale))
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+    bitmap.close()
+    blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/webp', 0.82))
+    if (!blob) throw new Error('Could not prepare this image. Try another file.')
+  }
+
+  const dataUrl = await new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = () => reject(new Error('Could not read this image.'))
+    reader.readAsDataURL(blob)
+  })
+  if (dataUrl.length > 2500000) throw new Error('This image is too large after processing. Try a smaller image.')
+  return dataUrl
+}
+
+const blankVehicleForm = () => ({ brand: '', name: '', category: 'standard', type: 'SUV', fuel: 'Petrol', seats: '5', pricePerDay: '', available: true, imageData: '' })
+
 const Icon = ({ name, size = 20 }) => {
   const paths = {
     car: <><path d="m5 11 1.5-4.5A2 2 0 0 1 8.4 5h7.2a2 2 0 0 1 1.9 1.5L19 11"/><path d="M3 11h18v7H3zM6 18v2m12-2v2M6 14h.01M18 14h.01"/></>,
@@ -41,6 +72,8 @@ function AdminDashboard({ user, onBack, onSignIn }) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [mutationId, setMutationId] = useState(null)
+  const [vehicleForm, setVehicleForm] = useState(blankVehicleForm)
+  const [vehicleSaving, setVehicleSaving] = useState(false)
 
   useEffect(() => {
     if (!user || String(user.role).toLowerCase() !== 'admin') return
@@ -60,7 +93,7 @@ function AdminDashboard({ user, onBack, onSignIn }) {
 
   const denied = !user || String(user.role).toLowerCase() !== 'admin'
   const rows = dashboard[tab] || []
-  const filtered = rows.filter((row) => Object.values(row).some((value) => String(value ?? '').toLowerCase().includes(query.toLowerCase())))
+  const filtered = rows.filter((row) => Object.entries(row).some(([key, value]) => key !== 'image_data' && String(value ?? '').toLowerCase().includes(query.toLowerCase())))
   const date = (value) => value ? new Date(value).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'
   const money = (value) => value == null ? '—' : `₹${Number(value).toLocaleString('en-IN')}`
 
@@ -94,6 +127,37 @@ function AdminDashboard({ user, onBack, onSignIn }) {
     finally { setMutationId(null) }
   }
 
+  const addVehicle = async (event) => {
+    event.preventDefault()
+    setError('')
+    setNotice('')
+    setVehicleSaving(true)
+    try {
+      const response = await fetch('/api/admin/vehicles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...vehicleForm, seats: Number(vehicleForm.seats), pricePerDay: Number(vehicleForm.pricePerDay) }),
+      })
+      const data = await readResponse(response)
+      if (!response.ok) throw new Error(data.error || 'Could not add this car.')
+      const vehicle = data.vehicle
+      setDashboard((current) => ({
+        ...current,
+        vehicles: [vehicle, ...current.vehicles],
+        overview: current.overview ? {
+          ...current.overview,
+          vehicles: Number(current.overview.vehicles) + 1,
+          availableVehicles: Number(current.overview.availableVehicles) + (vehicle.available ? 1 : 0),
+        } : current.overview,
+      }))
+      setVehicleForm(blankVehicleForm())
+      const input = document.getElementById('new-vehicle-image')
+      if (input) input.value = ''
+      setNotice(`${vehicle.brand} ${vehicle.name} was added to the fleet.`)
+    } catch (e) { setError(e.message) }
+    finally { setVehicleSaving(false) }
+  }
+
   return <section className="admin-page">
     <div className="admin-heading"><div><span className="eyebrow blue">MERIRIDE MANAGEMENT</span><h1>Admin dashboard</h1><p>Bookings, customers and your complete vehicle inventory.</p></div>{!denied && <button className="admin-refresh" onClick={() => setReload((n) => n + 1)}>↻ &nbsp;Refresh data</button>}</div>
     {denied ? <div className="admin-gate"><span className="admin-gate-icon">⌑</span><h2>{user ? 'Admin access required' : 'Sign in to continue'}</h2><p>{user ? 'This account does not have the admin role. Ask the database administrator to grant access.' : 'Sign in with an administrator account to view business data.'}</p><div><button className="admin-secondary" onClick={onBack}>Back to website</button>{!user && <button className="admin-primary" onClick={onSignIn}>Sign in</button>}</div></div> : <>
@@ -105,10 +169,37 @@ function AdminDashboard({ user, onBack, onSignIn }) {
       ].map(([label, value, note, icon]) => <article className="admin-metric" key={label}><span className="admin-metric-icon"><Icon name={icon} size={19} /></span><div><small>{label}</small><strong>{value ?? '—'}</strong><span>{note}</span></div></article>)}</div>
       <div className="admin-data-card"><div className="admin-data-head"><div className="admin-tabs">{[['bookings', 'Bookings / orders'], ['users', 'Users'], ['vehicles', 'Cars']].map(([id, label]) => <button key={id} className={tab === id ? 'selected' : ''} onClick={() => { setTab(id); setQuery('') }}>{label}<span>{dashboard[id]?.length ?? 0}</span></button>)}</div><label className="admin-search">⌕<input placeholder={`Search ${tab}…`} value={query} onChange={(e) => setQuery(e.target.value)} /></label></div>
         {error && <div className="admin-error" role="alert">{error}</div>}{notice && <div className="admin-success" role="status">{notice}</div>}{loading && <div className="admin-loading">Loading records…</div>}
+        {tab === 'vehicles' && !loading && <form className="admin-vehicle-form" onSubmit={addVehicle}>
+          <div className="admin-vehicle-form-heading"><div><span className="eyebrow blue">FLEET MANAGEMENT</span><h2>Add a car</h2><p>Upload a clear car photo. Mark premium inventory as a supercar to show it in the Prestige section.</p></div><span className="admin-vehicle-form-icon"><Icon name="car" size={21}/></span></div>
+          <div className="admin-vehicle-form-grid">
+            <label>Brand<input value={vehicleForm.brand} onChange={(e) => setVehicleForm({ ...vehicleForm, brand: e.target.value })} placeholder="e.g. Porsche" required maxLength={100}/></label>
+            <label>Model<input value={vehicleForm.name} onChange={(e) => setVehicleForm({ ...vehicleForm, name: e.target.value })} placeholder="e.g. 911 Carrera" required maxLength={100}/></label>
+            <label>Collection<select value={vehicleForm.category} onChange={(e) => setVehicleForm({ ...vehicleForm, category: e.target.value })}><option value="standard">Popular cars</option><option value="supercar">Supercar & Prestige</option></select></label>
+            <label>Body type<input value={vehicleForm.type} onChange={(e) => setVehicleForm({ ...vehicleForm, type: e.target.value })} placeholder="SUV, Sedan, Coupe…" required maxLength={60}/></label>
+            <label>Fuel<select value={vehicleForm.fuel} onChange={(e) => setVehicleForm({ ...vehicleForm, fuel: e.target.value })}><option>Petrol</option><option>Diesel</option><option>Electric</option><option>Hybrid</option><option>CNG</option></select></label>
+            <label>Seats<input type="number" min="1" max="12" value={vehicleForm.seats} onChange={(e) => setVehicleForm({ ...vehicleForm, seats: e.target.value })} required/></label>
+            <label>Price per day (₹)<input type="number" min="1" step="1" value={vehicleForm.pricePerDay} onChange={(e) => setVehicleForm({ ...vehicleForm, pricePerDay: e.target.value })} placeholder="e.g. 4500" required/></label>
+            <label className="admin-vehicle-image-field">Car photo<input id="new-vehicle-image" type="file" accept="image/jpeg,image/png,image/webp" required onChange={async (e) => {
+              const file = e.target.files?.[0]
+              if (!file) return
+              setError('')
+              try {
+                const imageData = await imageFileToDataUrl(file)
+                setVehicleForm((current) => ({ ...current, imageData }))
+              } catch (imageError) {
+                setError(imageError.message)
+                e.target.value = ''
+                setVehicleForm((current) => ({ ...current, imageData: '' }))
+              }
+            }} /><small>JPG, PNG, or WebP · up to 8 MB (optimized before saving)</small></label>
+            <div className="admin-vehicle-preview">{vehicleForm.imageData ? <img src={vehicleForm.imageData} alt="Car preview"/> : <span><Icon name="car" size={26}/>Photo preview</span>}</div>
+          </div>
+          <div className="admin-vehicle-form-foot"><label className="admin-vehicle-availability"><input type="checkbox" checked={vehicleForm.available} onChange={(e) => setVehicleForm({ ...vehicleForm, available: e.target.checked })}/> Available to rent</label><button className="admin-primary" type="submit" disabled={vehicleSaving || !vehicleForm.imageData}>{vehicleSaving ? 'Adding car…' : 'Add car to fleet'} <Icon name="arrow" size={15}/></button></div>
+        </form>}
         {!loading && !error && <div className="admin-table-scroll"><table className="admin-table">
           {tab === 'bookings' && <><thead><tr><th>Order</th><th>Customer</th><th>Vehicle</th><th>Pick-up</th><th>Drop-off</th><th>Total</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody>{filtered.map((b) => <tr key={b.id}><td><strong>MR-{String(b.id).padStart(6, '0')}</strong></td><td><strong>{b.customer_name || `User #${b.user_id}`}</strong><small>{b.customer_email || '—'}</small></td><td>{[b.vehicle_brand, b.vehicle_name].filter(Boolean).join(' ') || `Car #${b.vehicle_id}`}<small>{b.vehicle_type || ''}</small></td><td>{b.pickup_location || '—'}<small>{date(b.start_date)}{b.pickup_time ? ` · ${String(b.pickup_time).slice(0, 5)}` : ''}</small></td><td>{b.dropoff_location || '—'}<small>{date(b.end_date)}</small></td><td><strong>{money(b.total_amount)}</strong></td><td><select className="booking-status-select" aria-label={`Status for order MR-${b.id}`} value={bookingStatuses.includes(b.status) ? b.status : 'requested'} disabled={mutationId === b.id} onChange={(e) => changeBookingStatus(b, e.target.value)}>{!bookingStatuses.includes(b.status) && <option value={b.status}>{b.status || 'unknown'}</option>}{bookingStatuses.map((s) => <option value={s} key={s}>{s.replace('_', ' ')}</option>)}</select></td><td>{date(b.created_at)}</td><td><button className="admin-delete" disabled={mutationId === b.id} onClick={() => deleteBooking(b)}>Delete</button></td></tr>)}</tbody></>}
           {tab === 'users' && <><thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Role</th></tr></thead><tbody>{filtered.map((u) => <tr key={u.id}><td>#{u.id}</td><td><strong>{u.name || '—'}</strong></td><td>{u.email}</td><td>{u.phone || '—'}</td><td><span className={`admin-status ${String(u.role || 'customer').toLowerCase()}`}>{u.role || 'customer'}</span></td></tr>)}</tbody></>}
-          {tab === 'vehicles' && <><thead><tr><th>ID</th><th>Vehicle</th><th>Type</th><th>Fuel</th><th>Seats</th><th>Rate / day</th><th>Availability</th></tr></thead><tbody>{filtered.map((v) => <tr key={v.id}><td>#{v.id}</td><td><strong>{v.brand} {v.name}</strong></td><td>{v.type}</td><td>{v.fuel || '—'}</td><td>{v.seats}</td><td>{money(v.price_per_day)}</td><td><span className={`admin-status ${v.available ? 'available' : 'unavailable'}`}>{v.available ? 'Available' : 'Unavailable'}</span></td></tr>)}</tbody></>}
+          {tab === 'vehicles' && <><thead><tr><th>Photo</th><th>ID</th><th>Vehicle</th><th>Collection</th><th>Type</th><th>Fuel</th><th>Seats</th><th>Rate / day</th><th>Availability</th></tr></thead><tbody>{filtered.map((v) => <tr key={v.id}><td>{v.image_data ? <img className="admin-vehicle-thumb" src={v.image_data} alt=""/> : '—'}</td><td>#{v.id}</td><td><strong>{v.brand} {v.name}</strong></td><td><span className={'admin-status ' + (v.category === 'supercar' ? 'admin' : '')}>{v.category === 'supercar' ? 'Prestige' : 'Popular'}</span></td><td>{v.type}</td><td>{v.fuel || '—'}</td><td>{v.seats}</td><td>{money(v.price_per_day)}</td><td><span className={'admin-status ' + (v.available ? 'available' : 'unavailable')}>{v.available ? 'Available' : 'Unavailable'}</span></td></tr>)}</tbody></>}
           {filtered.length === 0 && <tbody><tr><td className="admin-empty" colSpan={tab === 'bookings' ? 9 : 8}>No matching records found.</td></tr></tbody>}
         </table></div>}
         <div className="admin-table-foot">Showing {filtered.length} of {rows.length} records</div>
@@ -165,7 +256,7 @@ function App() {
   const [authError, setAuthError] = useState('')
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(false)
-  const premiumVehicles = vehicles.filter((car) => /supercar|luxury|sport|performance|exotic/i.test(`${car.type} ${car.brand} ${car.name}`))
+  const premiumVehicles = vehicles.filter((car) => car.category === 'supercar')
 
   useEffect(() => {
     const syncPage = () => setPage(window.location.pathname === '/admin' ? 'admin' : window.location.pathname === '/admin/setup' ? 'setup' : 'home')
@@ -258,9 +349,9 @@ function App() {
 
       <section className="benefits" aria-label="Why MeriRide"><article><span className="benefit-icon"><Icon name="car" /></span><div><h3>Wide range of cars</h3><p>From economy to luxury,<br />we have it all.</p></div></article><article><span className="benefit-icon"><Icon name="tag" /></span><div><h3>Affordable prices</h3><p>Best prices for short<br />and long-term rentals.</p></div></article><article><span className="benefit-icon"><Icon name="calendar" /></span><div><h3>Easy booking</h3><p>Book online in minutes<br />and hit the road.</p></div></article><article><span className="benefit-icon"><Icon name="headset" /></span><div><h3>24/7 support</h3><p>We're here to help you<br />anytime, anywhere.</p></div></article></section>
 
-      <section className="popular section-wrap" id="cars"><div className="section-head"><div><span className="eyebrow blue">PICK YOUR RIDE</span><h2>Popular cars</h2></div><a href="#booking">View all cars <Icon name="arrow" size={16} /></a></div>{vehicles.length ? <div className="car-grid">{vehicles.slice(0, 10).map((car, index) => <article className="car-card" key={car.id}><div className="car-image"><img src={`https://images.unsplash.com/${carImages[index % carImages.length]}?auto=format&fit=crop&w=600&q=80`} alt={`${car.brand} ${car.name}`} loading="lazy" /></div><div className="car-info"><div className="car-title"><h3>{car.brand} {car.name}</h3><span className="available"><i /> Available</span></div><p>{car.type}{car.fuel ? ` · ${car.fuel}` : ''}</p><div className="car-specs"><span><Icon name="users" size={14} /> {car.seats} Seats</span></div><div className="car-foot"><div><strong>₹{Number(car.price_per_day).toLocaleString('en-IN')}</strong><span> / day</span></div><button type="button" className="card-book" onClick={() => { setForm({ ...form, vehicleId: String(car.id) }); document.querySelector('#booking')?.scrollIntoView({ behavior: 'smooth' }) }}>Choose car <Icon name="arrow" size={14} /></button></div></div></article>)}</div> : <p className="cars-empty">No available cars found in your database yet.</p>}</section>
+      <section className="popular section-wrap" id="cars"><div className="section-head"><div><span className="eyebrow blue">PICK YOUR RIDE</span><h2>Popular cars</h2></div><a href="#booking">View all cars <Icon name="arrow" size={16} /></a></div>{vehicles.length ? <div className="car-grid">{vehicles.slice(0, 10).map((car, index) => <article className="car-card" key={car.id}><div className="car-image"><img src={car.image_data || `https://images.unsplash.com/${carImages[index % carImages.length]}?auto=format&fit=crop&w=600&q=80`} alt={`${car.brand} ${car.name}`} loading="lazy" /></div><div className="car-info"><div className="car-title"><h3>{car.brand} {car.name}</h3><span className="available"><i /> Available</span></div><p>{car.type}{car.fuel ? ` · ${car.fuel}` : ''}</p><div className="car-specs"><span><Icon name="users" size={14} /> {car.seats} Seats</span></div><div className="car-foot"><div><strong>₹{Number(car.price_per_day).toLocaleString('en-IN')}</strong><span> / day</span></div><button type="button" className="card-book" onClick={() => { setForm({ ...form, vehicleId: String(car.id) }); document.querySelector('#booking')?.scrollIntoView({ behavior: 'smooth' }) }}>Choose car <Icon name="arrow" size={14} /></button></div></div></article>)}</div> : <p className="cars-empty">No available cars found in your database yet.</p>}</section>
 
-      <section className="prestige" id="premium"><div className="prestige-hero"><div className="prestige-photo"/><div className="prestige-copy"><span className="eyebrow">MERIRIDE PRESTIGE</span><h2>Make the drive<br/>the <span>experience.</span></h2><p>Discover a little more power, presence and occasion with our premium collection.</p><a className="prestige-link" href="#premium-cars">Explore the collection <Icon name="arrow" size={16}/></a></div><span className="prestige-seal">A RIDE<br/>TO REMEMBER</span></div><div className="prestige-list" id="premium-cars"><div className="prestige-list-head"><div><span className="eyebrow blue">THE EXTRAORDINARY, ON DEMAND</span><h3>Supercar & luxury rentals</h3></div><span className="prestige-count">{premiumVehicles.length} available</span></div>{premiumVehicles.length ? <div className="premium-grid">{premiumVehicles.map((car, index) => <article className="premium-card" key={car.id}><div className="premium-image"><img src={`https://images.unsplash.com/${['photo-1503376780353-7e6692767b70','photo-1544829099-b9a0c07fad1a','photo-1511919884226-fd3cad34687c'][index % 3]}?auto=format&fit=crop&w=900&q=85`} alt={`${car.brand} ${car.name}`} loading="lazy"/><span>PRESTIGE COLLECTION</span></div><div className="premium-details"><div><h4>{car.brand} {car.name}</h4><p>{car.type}{car.fuel ? ` · ${car.fuel}` : ''} · {car.seats} seats</p></div><strong>₹{Number(car.price_per_day).toLocaleString('en-IN')}<small> / day</small></strong></div><button type="button" onClick={() => { setForm({ ...form, vehicleId: String(car.id) }); document.querySelector('#booking')?.scrollIntoView({ behavior: 'smooth' }) }}>Reserve this car <Icon name="arrow" size={15}/></button></article>)}</div> : <div className="premium-empty"><span>✦</span><div><strong>Curated drives are coming soon.</strong><p>Contact our team to ask about premium and supercar availability in Mumbai.</p></div><a href="mailto:hello@meriride.in?subject=Premium%20car%20rental">Enquire now <Icon name="arrow" size={15}/></a></div>}</div></section>
+      <section className="prestige" id="premium"><div className="prestige-hero"><div className="prestige-photo"/><div className="prestige-copy"><span className="eyebrow">MERIRIDE PRESTIGE</span><h2>Make the drive<br/>the <span>experience.</span></h2><p>Discover a little more power, presence and occasion with our premium collection.</p><a className="prestige-link" href="#premium-cars">Explore the collection <Icon name="arrow" size={16}/></a></div><span className="prestige-seal">A RIDE<br/>TO REMEMBER</span></div><div className="prestige-list" id="premium-cars"><div className="prestige-list-head"><div><span className="eyebrow blue">THE EXTRAORDINARY, ON DEMAND</span><h3>Supercar & luxury rentals</h3></div><span className="prestige-count">{premiumVehicles.length} available</span></div>{premiumVehicles.length ? <div className="premium-grid">{premiumVehicles.map((car, index) => <article className="premium-card" key={car.id}><div className="premium-image"><img src={car.image_data || `https://images.unsplash.com/${['photo-1503376780353-7e6692767b70','photo-1544829099-b9a0c07fad1a','photo-1511919884226-fd3cad34687c'][index % 3]}?auto=format&fit=crop&w=900&q=85`} alt={`${car.brand} ${car.name}`} loading="lazy"/><span>PRESTIGE COLLECTION</span></div><div className="premium-details"><div><h4>{car.brand} {car.name}</h4><p>{car.type}{car.fuel ? ` · ${car.fuel}` : ''} · {car.seats} seats</p></div><strong>₹{Number(car.price_per_day).toLocaleString('en-IN')}<small> / day</small></strong></div><button type="button" onClick={() => { setForm({ ...form, vehicleId: String(car.id) }); document.querySelector('#booking')?.scrollIntoView({ behavior: 'smooth' }) }}>Reserve this car <Icon name="arrow" size={15}/></button></article>)}</div> : <div className="premium-empty"><span>✦</span><div><strong>Curated drives are coming soon.</strong><p>Contact our team to ask about premium and supercar availability in Mumbai.</p></div><a href="mailto:hello@meriride.in?subject=Premium%20car%20rental">Enquire now <Icon name="arrow" size={15}/></a></div>}</div></section>
 
       <section className="about" id="about"><div className="about-copy"><span className="eyebrow">A BETTER WAY TO GET THERE</span><h2>Every journey<br />has a <span>good story.</span></h2><p>At MeriRide, the journey matters as much as the destination. Find the right car, enjoy transparent prices and let us take care of the details.</p><a href="#booking" className="about-link">Get on the road <Icon name="arrow" size={16} /></a></div><div className="stats"><div><span className="stat-icon"><Icon name="users" /></span><strong>10,000<span>+</span></strong><small>Happy customers</small></div><div><span className="stat-icon"><Icon name="car" /></span><strong>500<span>+</span></strong><small>Cars available</small></div><div><span className="stat-icon"><Icon name="pin" /></span><strong>25<span>+</span></strong><small>City locations</small></div><div><span className="stat-icon"><Icon name="shield" /></span><strong>100<span>%</span></strong><small>Customer satisfaction</small></div></div></section>
       <footer id="contact"><a className="brand footer-brand" href="#home"><span className="brand-mark"><Icon name="car" size={22} /></span><span>Meri<span>Ride</span><small>Your journey, our responsibility</small></span></a><p>Good rides. Great memories.</p><a href="mailto:hello@meriride.in">hello@meriride.in</a><span>© 2025 MeriRide. All rights reserved.</span></footer>

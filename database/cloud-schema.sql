@@ -16,8 +16,10 @@ CREATE TABLE IF NOT EXISTS `users` (
 CREATE TABLE IF NOT EXISTS `vehicle` (
   `id` BIGINT NOT NULL AUTO_INCREMENT,
   `available` BIT(1) NOT NULL,
+  `category` VARCHAR(32) NOT NULL DEFAULT 'standard',
   `brand` VARCHAR(255) NOT NULL,
   `fuel` VARCHAR(255) DEFAULT NULL,
+  `image_data` MEDIUMTEXT NULL,
   `name` VARCHAR(255) NOT NULL,
   `price_per_day` DECIMAL(38,2) NOT NULL,
   `seats` INT NOT NULL,

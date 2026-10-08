@@ -32,7 +32,7 @@ app.use(helmet({
   },
 }))
 app.use(cors({ origin, credentials: true, methods: ['GET', 'POST', 'PATCH', 'DELETE'], allowedHeaders: ['Content-Type'] }))
-app.use(express.json({ limit: '10kb' }))
+app.use(express.json({ limit: '4mb' }))
 app.use(cookieParser())
 app.use('/api', rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -69,6 +69,17 @@ const accountSchema = z.object({
 }).strict()
 const loginSchema = z.object({ email: z.string().trim().email().max(255), password: z.string().min(1).max(128) }).strict()
 const bookingStatusSchema = z.object({ status: z.enum(['requested', 'confirmed', 'in_progress', 'completed', 'cancelled']) }).strict()
+const vehicleSchema = z.object({
+  brand: z.string().trim().min(1).max(100),
+  name: z.string().trim().min(1).max(100),
+  category: z.enum(['standard', 'supercar']),
+  type: z.string().trim().min(1).max(60),
+  fuel: z.string().trim().max(40).optional().default(''),
+  seats: z.number().int().min(1).max(12),
+  pricePerDay: z.number().positive().max(1000000),
+  available: z.boolean(),
+  imageData: z.string().max(2500000).regex(/^data:image\/(?:webp|jpeg|png);base64,[A-Za-z0-9+/]+={0,2}$/),
+}).strict()
 const bookingSchema = z.object({
   vehicleId: z.number().int().positive(),
   pickupLocation: z.string().trim().min(2).max(255),
@@ -177,7 +188,7 @@ app.post('/api/admin/setup', authLimit, async (req, res) => {
 app.get('/api/vehicles', async (_req, res) => {
   try {
     const [rows] = await pool.execute(
-      'SELECT id, brand, name, fuel, price_per_day, seats, type FROM vehicle WHERE available = 1 ORDER BY id DESC LIMIT 100',
+      'SELECT id, brand, name, fuel, price_per_day, seats, type, category, image_data FROM vehicle WHERE available = 1 ORDER BY id DESC LIMIT 100',
     )
     res.json(rows)
   } catch (error) {
@@ -235,11 +246,29 @@ app.get('/api/admin/users', currentUser, requireAdmin, async (_req, res) => {
 
 app.get('/api/admin/vehicles', currentUser, requireAdmin, async (_req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT id, available, brand, fuel, name, price_per_day, seats, type FROM vehicle ORDER BY id DESC')
+    const [rows] = await pool.execute('SELECT id, available + 0 AS available, brand, fuel, name, price_per_day, seats, type, category, image_data FROM vehicle ORDER BY id DESC')
     res.json(rows)
   } catch (error) {
     console.error('Admin vehicles query failed:', error.code || 'database error')
     res.status(503).json({ error: 'Could not load vehicle inventory.' })
+  }
+})
+
+app.post('/api/admin/vehicles', currentUser, requireAdmin, async (req, res) => {
+  const parsed = vehicleSchema.safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ error: 'Enter valid car details and upload a supported image.' })
+  const { brand, name, category, type, fuel, seats, pricePerDay, available, imageData } = parsed.data
+  try {
+    const [result] = await pool.execute(
+      'INSERT INTO vehicle (available, brand, fuel, name, price_per_day, seats, type, category, image_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [available ? 1 : 0, brand, fuel || null, name, pricePerDay, seats, type, category, imageData],
+    )
+    res.status(201).json({
+      vehicle: { id: result.insertId, available, brand, fuel: fuel || null, name, price_per_day: pricePerDay, seats, type, category, image_data: imageData },
+    })
+  } catch (error) {
+    console.error('Vehicle creation failed:', error.code || 'database error')
+    res.status(503).json({ error: 'Could not add this car. Confirm the vehicle image migration has been applied.' })
   }
 })
 
